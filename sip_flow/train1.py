@@ -18,8 +18,6 @@ from torch.optim.lr_scheduler import StepLR, CosineAnnealingWarmRestarts, Cosine
 # from constructGraph import getMvKNNGraph, getIncMvKNNGraph
 import time
 import multiprocessing
-from model_new2 import get_model2
-
 
 def view_mixup(data_list,label,v_mask,l_mask):
     new_data = []
@@ -51,7 +49,7 @@ def train(loader, model, loss_model, opt, sche, epoch,dep_graph,last_preds,logge
         inc_V_ind = inc_V_ind.float().to('cuda:0')
         inc_L_ind = inc_L_ind.float().to('cuda:0')
         data_selected = [data[i] for i in selected_view]
-        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, pred, xr_p_list, cos_loss, mapped_loss, loss_manifold_p_avg , fusion_p, mapped_fea = model(data_selected,mode=1,mask=inc_V_ind )
+        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, pred, xr_p_list, cos_loss, mapped_loss,loss_manifold_p_avg, fusion_p, mapped_fea = model(data_selected,mode=0,mask=inc_V_ind )
         All_preds = torch.cat([All_preds,pred],dim=0)
         if epoch<args.pre_epochs:
             loss_mse_viewspec = 0
@@ -72,7 +70,7 @@ def train(loader, model, loss_model, opt, sche, epoch,dep_graph,last_preds,logge
                 ## xr_list是每个重构的视图，这个损失是用来约束VAE的，使得潜在空间的特征能够很好的表征原数据
                 loss_mse_p += loss_model.weighted_wmse_loss(data_selected[v],xr_p_list[v],inc_V_ind[:,v],reduction='mean')
             assert torch.sum(torch.isnan(loss_mse)).item() == 0
-            loss = loss_CL + loss_mse *args.alpha + z_c_loss*args.beta + cohr_loss *args.sigma + mapped_loss*0.1 + loss_mse_p*0.1 + cos_loss*0.1 
+            loss = loss_CL + loss_mse *args.alpha + z_c_loss*args.beta + cohr_loss *args.sigma
         # loss = loss_CL
         opt.zero_grad()
         loss.backward()
@@ -91,72 +89,9 @@ def train(loader, model, loss_model, opt, sche, epoch,dep_graph,last_preds,logge
                   'Loss {losses.avg:.3f}'.format(
                         epoch,   batch_time=batch_time,
                         data_time=data_time, losses=losses))
-    return losses,model,All_preds,label_emb_sample, fusion_p, mapped_fea
+    return losses,model,All_preds,label_emb_sample
 
-def train_step2(loader, model, model_last, loss_model, opt, sche, epoch,dep_graph,last_preds,logger,selected_view, selected_view_last):
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
-    losses = AverageMeter()
-    mce= nn.MultiLabelSoftMarginLoss()
-    model.train()
-    end = time.time()
-    All_preds = torch.tensor([]).cuda()
-    for i, (data, label, inc_V_ind, inc_L_ind) in enumerate(loader):
-        data_time.update(time.time() - end)
-        data=[v_data.to('cuda:0') for v_data in data]
-        label = label.to('cuda:0')
-        inc_V_ind = inc_V_ind.float().to('cuda:0')
-        inc_L_ind = inc_L_ind.float().to('cuda:0')
-        data_selected = [data[i] for i in selected_view]
-        with torch.no_grad():
-            # 准备第一阶段模型的输入
-            data_view_1 = [data[i] for i in selected_view_last]  # 使用第一阶段的视图选择
-            # 使用第一阶段模型生成当前批次对应的输出
-            _, _, _, _, _, _, _, _, xr_p_list, _, mapped_loss, loss_manifold_p_avg , fusion_p, mapped_fea = model_last(data_view_1,mode=1, mask=inc_V_ind)
-
-        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, pred, xr_p_list, cos_loss, loss_manifold_p_avg = model(data_selected,mapped_fea,mask=inc_V_ind )
-        All_preds = torch.cat([All_preds,pred],dim=0)
-        if epoch<args.pre_epochs:
-            loss_mse_viewspec = 0
-            loss_CL_views = 0
-            loss_list=[]
-            loss = loss_CL_views
-            assert torch.sum(torch.isnan(loss)).item() == 0
-            assert torch.sum(torch.isinf(loss)).item() == 0
-        else:
-            loss_CL = loss_model.weighted_BCE_loss(pred,label,inc_L_ind)
-            z_c_loss = loss_model.z_c_loss_new(z_sample, label, label_emb_sample,inc_L_ind)
-            cohr_loss = loss_model.corherent_loss(uniview_mu_list, uniview_sca_list,fusion_z_mu, fusion_z_sca,mask=inc_V_ind)
-            loss_mse = 0
-            loss_mse_p = 0
-            for v in range(len(data_selected)):
-                loss_mse += loss_model.weighted_wmse_loss(data_selected[v],xr_list[v],inc_V_ind[:,v],reduction='mean')
-            for v in range(len(data_selected)):
-                ## xr_list是每个重构的视图，这个损失是用来约束VAE的，使得潜在空间的特征能够很好的表征原数据
-                loss_mse_p += loss_model.weighted_wmse_loss(data_selected[v],xr_p_list[v],inc_V_ind[:,v],reduction='mean')
-            assert torch.sum(torch.isnan(loss_mse)).item() == 0
-            loss = loss_CL + loss_mse *args.alpha + z_c_loss*args.beta + cohr_loss *args.sigma + loss_mse_p*0.01 + cos_loss*0.01 
-        # loss = loss_CL
-        opt.zero_grad()
-        loss.backward()
-        if isinstance(sche,CosineAnnealingWarmRestarts):
-            sche.step(epoch + i / len(loader))
-        opt.step()
-        # print(model.classifier.parameters().grad)
-        losses.update(loss.item())
-        batch_time.update(time.time()- end)
-        end = time.time()
-    if isinstance(sche,StepLR):
-        sche.step()
-    logger.info('Epoch:[{0}]\t'
-                  'Time {batch_time.avg:.3f}\t'
-                  'Data {data_time.avg:.3f}\t'
-                  'Loss {losses.avg:.3f}'.format(
-                        epoch,   batch_time=batch_time,
-                        data_time=data_time, losses=losses))
-    return losses,model,All_preds
-
-def test1(loader, model, loss_model, epoch,logger,selected_view):
+def test(loader, model, loss_model, epoch,logger,selected_view):
     batch_time = AverageMeter()
     losses = AverageMeter()
     total_labels = []
@@ -168,7 +103,7 @@ def test1(loader, model, loss_model, epoch,logger,selected_view):
         data=[v_data.to('cuda:0') for v_data in data]
         data_selected = [data[i] for i in selected_view]
         # pred,_,_ = model(data,mask=torch.ones_like(inc_V_ind).to('cuda:0'))
-        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, qc_z, xr_p_list, cos_loss, _, _, fusion_p, mapped_fea = model(data_selected,mode=1,mask=inc_V_ind.to('cuda:0'))
+        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, qc_z, xr_p_list, cos_loss, _ ,_,_,_ = model(data_selected,mode=0,mask=inc_V_ind.to('cuda:0'))
         # qc_x = vade_trick(fusion_z_mu, model.mix_prior, model.mix_mu, model.mix_sca)
         pred = qc_z
         pred = pred.cpu()
@@ -197,52 +132,6 @@ def test1(loader, model, loss_model, epoch,logger,selected_view):
                         ))
     return evaluation_results
 
-def test2(loader, model, model_last, loss_model, epoch,logger,selected_view, selected_view_last):
-    batch_time = AverageMeter()
-    losses = AverageMeter()
-    total_labels = []
-    total_preds = []
-    model.eval()
-    end = time.time()
-    for i, (data, label, inc_V_ind, inc_L_ind) in enumerate(loader):
-        # data_time.update(time.time() - end)
-        data=[v_data.to('cuda:0') for v_data in data]
-        data_selected = [data[i] for i in selected_view]
-        # pred,_,_ = model(data,mask=torch.ones_like(inc_V_ind).to('cuda:0'))
-        with torch.no_grad():
-            model_last.eval()  # 确保第一阶段模型处于评估模式
-            # 准备第一阶段模型的输入
-            data_view_1 = [data[i] for i in selected_view_last]  # 使用第一阶段的视图选择
-            # 使用第一阶段模型生成当前批次对应的输出
-            z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, pred, xr_p_list, cos_loss, mapped_loss, loss_manifold_p_avg , fusion_p, mapped_fea = model_last(data_view_1, mode=1,mask=inc_V_ind)
-        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, qc_z, xr_p_list, cos_loss, _ = model(data_selected,mapped_fea,mask=inc_V_ind.to('cuda:0'))
-        # qc_x = vade_trick(fusion_z_mu, model.mix_prior, model.mix_mu, model.mix_sca)
-        pred = qc_z
-        pred = pred.cpu()
-        total_labels = np.concatenate((total_labels,label.numpy()),axis=0) if len(total_labels)>0 else label.numpy()
-        total_preds = np.concatenate((total_preds,pred.detach().numpy()),axis=0) if len(total_preds)>0 else pred.detach().numpy()
-        loss=loss_model.weighted_BCE_loss(pred,label,inc_L_ind)
-        losses.update(loss.item())
-        batch_time.update(time.time()- end)
-        end = time.time()
-    total_labels=np.array(total_labels)
-    total_preds=np.array(total_preds)
-    evaluation_results=evaluation.do_metric(total_preds,total_labels)
-    logger.info('Epoch:[{0}]\t'
-                  'Time {batch_time.avg:.3f}\t'
-                  'Loss {losses.avg:.3f}\t'
-                  'AP {ap:.3f}\t'
-                  'HL {hl:.3f}\t'
-                  'RL {rl:.3f}\t'
-                  'AUC {auc:.3f}\t'.format(
-                        epoch,   batch_time=batch_time,
-                        losses = losses,
-                        ap=evaluation_results[4],
-                        hl=evaluation_results[0],
-                        rl=evaluation_results[3],
-                        auc=evaluation_results[5]
-                        ))
-    return evaluation_results
 def main(args,file_path):
     panduan_list=[0]
     for panduan in panduan_list:
@@ -312,143 +201,79 @@ def main(args,file_path):
                     val_dataloder,val_dataset = MLdataset.getIncDataloader(data_path, fold_data_path,training_ratio=args.training_sample_ratio,fold_idx=fold_idx,mode='val',batch_size=args.batch_size,num_workers=0)
                     d_list = train_dataset.d_list
                     classes_num = train_dataset.classes_num
-                    scheduler = None
                     labels = torch.tensor(train_dataset.cur_labels).float().to('cuda:0')
                     dep_graph = torch.matmul(labels.T,labels)
                     dep_graph = dep_graph/(torch.diag(dep_graph).unsqueeze(1)+1e-10)
                     # dep_graph[dep_graph<=args.sigma]=0.
                     dep_graph.fill_diagonal_(fill_value=0.)
-                    static_res1 = 0
-                    static_res2 = 0
-                    ### 第一二阶段分开训练
-                    total_losses = AverageMeter()
-                    loss_model = Loss()
-                    best_model_dict1 = {}
-                    best_model_dict2 = {}
-                    bound = 60
-                    model_2 = None
-                    model_1 = None
-                    start = time.time()
-                    selected_view1 = [0,1]
-                    selected_view2 = [2,0]
-                    d_list_selected1 = [train_dataset.d_list[i] for i in selected_view1]
-                    d_list_selected2 = [train_dataset.d_list[i] for i in selected_view2]
-                    model_1 = get_model(d_list_selected1, num_classes=classes_num, z_dim=args.z_dim, adj=dep_graph, rand_seed=0)
-                    model_2 = get_model2(d_list_selected2,num_classes=classes_num,z_dim=args.z_dim,adj=dep_graph,rand_seed=0)
-                    optimizer_1 = Adam(model_1.parameters(), lr=args.lr)
-                    optimizer_2 = Adam([
-                                    {'params': model_2.parameters(), 'lr': args.lr},
-                                ])
-                    loss_model = Loss()
-                    for epoch in range(args.epochs):
-                        if (epoch <= bound):
-                            # 此处默认前面的元素是存活视图，最后一个元素是即将消失的视图，映射关系是 之前所有元素 --> 最后一个元素
-                            print("selected_view: ",selected_view1)
-                            if epoch == 0:
-                                All_preds = None
-                            train_losses,model_1,All_preds, label_emb_sample, fusion_p, mapped_fea = train(train_dataloder,model_1,loss_model,optimizer_1,scheduler,epoch,dep_graph,All_preds,logger, selected_view1)
-                            if epoch >= args.pre_epochs:
-
-                                val_results = test1(val_dataloder,model_1,loss_model,epoch,logger, selected_view1)
-                                if val_results[0]*0.25+val_results[4]*0.25+val_results[5]*0.25>=static_res1:
-                                    static_res1 = val_results[0]*0.25+val_results[4]*0.25+val_results[5]*0.25
-                                    best_model_dict1['model'] = copy.deepcopy(model_1.state_dict())
-                                    best_model_dict1['epoch'] = epoch
-                                    best_epoch=epoch
-                                train_losses_last = train_losses
-                                total_losses.update(train_losses.sum)
-                        else:
-                            print("selected_view: ",selected_view2)
-                            if epoch == bound + 1:  # 只在进入第二阶段的第一个epoch初始化
-                                print("进入第二阶段")
-                                print("best model epoch: ",best_model_dict1['epoch'])
-                                model_1.load_state_dict(best_model_dict1['model'])  # 确保model_1加载了最佳状态
-                                with torch.no_grad():
-                                    model_2.label_embedding_u.data.copy_(model_1.label_embedding_u.data)
-                                    print("已成功从第一阶段继承标签嵌入参数")
-
-                            if epoch==0:
-                                All_preds = None
-                            train_losses,model_2,All_preds = train_step2(train_dataloder,model_2,model_1,loss_model,optimizer_2,scheduler,epoch,dep_graph,All_preds,logger, selected_view2, selected_view1)
-                            
-                            if epoch >= args.pre_epochs:
-
-                                val_results = test2(val_dataloder,model_2,model_1,loss_model,epoch,logger, selected_view2,selected_view1)
-                                if val_results[0]*0.25+val_results[4]*0.25+val_results[5]*0.25>=static_res2:
-                                    static_res2 = val_results[0]*0.25+val_results[4]*0.25+val_results[5]*0.25
-                                    best_model_dict2['model'] = copy.deepcopy(model_2.state_dict())
-                                    best_model_dict2['epoch'] = epoch
-                                    best_epoch=epoch
-                                train_losses_last = train_losses
-                                total_losses.update(train_losses.sum)
+                    pri_c = train_dataset.cur_labels.sum(axis=0)/train_dataset.cur_labels.shape[0]
+                    pri_c = torch.tensor(pri_c).cuda()
+                    
                     # 定义所有需要测试的视图组合
-                    # all_selected_views = [
-                    #     [0, 1, 2, 3, 4, 5],  # 所有视图
-                    # ]
+                    all_selected_views = [
+                        [0,1,2,3,4,5],  # 所有视图
+                    ]
                     
                     
                     # 创建一个字典来存储所有视图组合的结果
                     all_views_results = {}
                     
-                    # # 为每个视图组合进行训练和测试
-                    # for selected_view in all_selected_views:
-                    #     view_name = ','.join(map(str, selected_view))
-                    #     logger.info(f"Training with selected views: {view_name}")
-                        
-                    #     start = time.time()
-                    #     d_list_selected = [train_dataset.d_list[i] for i in selected_view]  
-                    #     model = get_model(d_list_selected, num_classes=classes_num, z_dim=args.z_dim, adj=dep_graph, rand_seed=0)
-                    #     loss_model = Loss()
-                    #     optimizer = Adam(model.parameters(), lr=args.lr)
-                    #     scheduler = None
-                        
-                    #     static_res = 0
-                    #     epoch_results = [AverageMeter() for i in range(9)]
-                    #     total_losses = AverageMeter()
-                    #     train_losses_last = AverageMeter()
-                    #     best_epoch = 0
-                    #     best_model_dict = {'model': model.state_dict(), 'epoch': 0}
-                        
-                    #     for epoch in range(args.epochs):
-                    #         if epoch == 0:
-                    #             All_preds = None
-                    #         train_losses, model, All_preds, label_emb_sample = train(train_dataloder, model, loss_model, optimizer, scheduler, epoch, dep_graph, All_preds, logger, selected_view)
-                    #         label_InP = label_emb_sample.mm(label_emb_sample.t())
-                            
-                    #         if epoch >= args.pre_epochs:
-                    #             val_results = test1(val_dataloder, model, loss_model, epoch, logger, selected_view)
-                    #             if val_results[0]*0.25+val_results[4]*0.25+val_results[5]*0.25 >= static_res:
-                    #                 static_res = val_results[0]*0.25+val_results[4]*0.25+val_results[5]*0.25
-                    #                 best_model_dict['model'] = copy.deepcopy(model.state_dict())
-                    #                 best_model_dict['epoch'] = epoch
-                    #                 best_epoch = epoch
-                    #             train_losses_last = train_losses
-                    #             total_losses.update(train_losses.sum)
-                    model_1.load_state_dict(best_model_dict1['model'])
-                    print("test results_1")
-                    test_results_1 = test1(test_dataloder,model_1,loss_model,epoch,logger,selected_view1)  
-                    model_2.load_state_dict(best_model_dict2['model'])
-                    end = time.time()
-                    logger.info(f"Best epoch: {best_model_dict2['epoch']}")
-                    test_results = test2(test_dataloder, model_2, model_1, loss_model, epoch, logger, selected_view2,selected_view1)
-                    for selected_view in selected_view2:
+                    # 为每个视图组合进行训练和测试
+                    for selected_view in all_selected_views:
                         view_name = ','.join(map(str, selected_view))
-                    # 存储当前视图组合的结果
-                    all_views_results[view_name] = {
-                        'accuracy': test_results[0],
-                        'one_error': test_results[1],
-                        'coverage': test_results[2],
-                        'ranking_loss': test_results[3],
-                        'precision': test_results[4],
-                        'auc': test_results[5],
-                        'f1': test_results[6],
-                        'training_time': end - start,
-                        'best_epoch': best_epoch
-                    }
-                    
-                    # 清理显存
-                    del model
-                    torch.cuda.empty_cache()
+                        logger.info(f"Training with selected views: {view_name}")
+                        
+                        start = time.time()
+                        d_list_selected = [train_dataset.d_list[i] for i in selected_view]  
+                        model = get_model(d_list_selected, num_classes=classes_num, z_dim=args.z_dim, adj=dep_graph, rand_seed=0)
+                        loss_model = Loss()
+                        optimizer = Adam(model.parameters(), lr=args.lr)
+                        scheduler = None
+                        
+                        static_res = 0
+                        epoch_results = [AverageMeter() for i in range(9)]
+                        total_losses = AverageMeter()
+                        train_losses_last = AverageMeter()
+                        best_epoch = 0
+                        best_model_dict = {'model': model.state_dict(), 'epoch': 0}
+                        
+                        for epoch in range(args.epochs):
+                            if epoch == 0:
+                                All_preds = None
+                            train_losses, model, All_preds, label_emb_sample = train(train_dataloder, model, loss_model, optimizer, scheduler, epoch, dep_graph, All_preds, logger, selected_view)
+                            label_InP = label_emb_sample.mm(label_emb_sample.t())
+                            
+                            if epoch >= args.pre_epochs:
+                                val_results = test(val_dataloder, model, loss_model, epoch, logger, selected_view)
+                                if val_results[0]*0.25+val_results[4]*0.25+val_results[5]*0.25 >= static_res:
+                                    static_res = val_results[0]*0.25+val_results[4]*0.25+val_results[5]*0.25
+                                    best_model_dict['model'] = copy.deepcopy(model.state_dict())
+                                    best_model_dict['epoch'] = epoch
+                                    best_epoch = epoch
+                                train_losses_last = train_losses
+                                total_losses.update(train_losses.sum)
+                        
+                        model.load_state_dict(best_model_dict['model'])
+                        end = time.time()
+                        logger.info(f"Best epoch: {best_model_dict['epoch']}")
+                        test_results = test(test_dataloder, model, loss_model, epoch, logger, selected_view)
+                        
+                        # 存储当前视图组合的结果
+                        all_views_results[view_name] = {
+                            'accuracy': test_results[0],
+                            'one_error': test_results[1],
+                            'coverage': test_results[2],
+                            'ranking_loss': test_results[3],
+                            'precision': test_results[4],
+                            'auc': test_results[5],
+                            'f1': test_results[6],
+                            'training_time': end - start,
+                            'best_epoch': best_epoch
+                        }
+                        
+                        # 清理显存
+                        del model
+                        torch.cuda.empty_cache()
                     
                     # 收集当前fold的结果，保存到对应的列表中
                     for view_name, results in all_views_results.items():
@@ -607,7 +432,7 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1)
     parser.add_argument('--momentum', type=float, default=0.9)
     parser.add_argument('--weight_decay', type=float, default=1e-4)
-    parser.add_argument('--epochs', type=int, default=120) #200 for corel5k  100 for iaprtc12 50 for pascal07 30 for espgame
+    parser.add_argument('--epochs', type=int, default=100) #200 for corel5k  100 for iaprtc12 50 for pascal07 30 for espgame
     parser.add_argument('--pre_epochs', type=int, default=0)
     # Training args
     parser.add_argument('--z_dim', type=int, default=512)

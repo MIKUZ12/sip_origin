@@ -237,7 +237,27 @@ class VAE(nn.Module):
             uniview_mu_s_list.append(z_mu_v_s)
             uniview_sca_s_list.append(z_sca_v_s)
         return uniview_mu_s_list, uniview_sca_s_list, fea_p_list, mapped_fea, map_loss
-
+    
+    def inference_z_womap(self, x_list):
+        uniview_mu_s_list = []
+        uniview_sca_s_list = []
+        fea_s_list = []
+        fea_p_list = []
+        for v in range(self.num_views):
+            if torch.sum(torch.isnan(x_list[v])).item() > 0:
+                print("zzz:nan")
+                pass
+            # 每一个view都通过qz_inference提取特征
+            fea_s = self.qz_inference_s[v](x_list[v])
+            fea_p = self.qz_inference_p[v](x_list[v])   
+            fea_s_list.append(fea_s)
+            fea_p_list.append(fea_p)
+        for fea_s in (fea_s_list):
+            z_mu_v_s, z_sca_v_s = self.qz_inference_header(fea_s)
+            uniview_mu_s_list.append(z_mu_v_s)
+            uniview_sca_s_list.append(z_sca_v_s)
+        return uniview_mu_s_list, uniview_sca_s_list, fea_p_list
+    
     def generation_x(self, z):
         xr_dist = []
         for v in range(self.num_views):
@@ -319,9 +339,14 @@ class VAE(nn.Module):
             aggregate_features = torch.nan_to_num(aggregate_features, nan=0.0)
         
         return aggregate_features
-    def forward(self, x_list, mask=None):
+    def forward(self, x_list, mode,mask=None):
         # uniview_mu_list, uniview_sca_list = self.inference_z(x_list)
-        mu_s_list, sca_s_list, fea_p_list, mapped_fea, map_loss = self.inference_z1(x_list)
+        if (mode == 1):
+            mu_s_list, sca_s_list, fea_p_list, mapped_fea, map_loss = self.inference_z1(x_list)
+        else:
+            mu_s_list, sca_s_list, fea_p_list = self.inference_z_womap(x_list)
+            mapped_fea = None
+            map_loss = None
         z_mu = torch.stack(mu_s_list,dim=0) # [v n d]
         z_sca = torch.stack(sca_s_list,dim=0) # [v n d]
         if torch.sum(torch.isnan(z_mu)).item() > 0:

@@ -196,7 +196,7 @@ class Net(nn.Module):
         assert torch.sum(torch.isnan(aggregate_var)).item()==0
         assert torch.sum(torch.isinf(aggregate_var)).item()==0
         return aggregate_mu, aggregate_var
-    def forward(self, x_list,mask):
+    def forward(self, x_list,mode,mask):
         # Generating semantic label embeddings via label semantic encoding module
         # label_embedding = self.GIN_encoder(self.label_embedding, self.label_adj)
         # print(self.label_adj[:10,:10])
@@ -212,7 +212,7 @@ class Net(nn.Module):
         # label_embedding_sample = self.GAT_encoder(label_embedding_sample, self.adj)
         if torch.sum(torch.isnan(label_embedding)).item() > 0:
             assert torch.sum(torch.isnan(label_embedding)).item() == 0
-        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, xr_p_list, cos_loss, mapped_fea, mapped_loss,fea_p_list = self.VAE(x_list,mask=None)  #Z[i]=[128, 260, 512] b c d_e
+        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, xr_p_list, cos_loss, mapped_fea, mapped_loss,fea_p_list = self.VAE(x_list,mode,mask=None)  #Z[i]=[128, 260, 512] b c d_e
         if torch.sum(torch.isnan(z_sample)).item() > 0:
             pass
         p_vae_p_list = []

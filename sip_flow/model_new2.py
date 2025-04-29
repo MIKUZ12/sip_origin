@@ -197,6 +197,14 @@ class Net(nn.Module):
         assert torch.sum(torch.isinf(aggregate_var)).item()==0
         return aggregate_mu, aggregate_var
     def forward(self, x_list, mapped_fea, mask):
+        masked_x_list = []
+        dropout_rate = 0.2
+        for x in x_list:
+            # 生成与x相同形状的随机掩码
+            random_mask = torch.rand_like(x) > dropout_rate
+            # 应用掩码（相当于dropout）
+            masked_x = x * random_mask.float()
+            masked_x_list.append(masked_x)
         # Generating semantic label embeddings via label semantic encoding module
         # label_embedding = self.GIN_encoder(self.label_embedding, self.label_adj)
         # print(self.label_adj[:10,:10])
@@ -249,7 +257,7 @@ if __name__=="__main__":
     from MLdataset import getIncDataloader
     dataloder,dataset = getIncDataloader('/disk/MATLAB-NOUPLOAD/MyMVML-data/corel5k/corel5k_six_view.mat','/disk/MATLAB-NOUPLOAD/MyMVML-data/corel5k/corel5k_six_view_MaskRatios_0_LabelMaskRatio_0_TraindataRatio_0.7.mat',training_ratio=0.7,mode='train',batch_size=3,num_workers=2)
     input = next(iter(dataloder))[0]
-    model=get_model(num_classes=260,beta=0.2,in_features=1,class_emb=260,rand_seed=0)
+    model=get_model2(num_classes=260,beta=0.2,in_features=1,class_emb=260,rand_seed=0)
     input = [v_data.to('cuda:0') for v_data in input]
     # print(input[0])
     pred,_,_=model(input)

@@ -19,7 +19,35 @@ from torch.optim.lr_scheduler import StepLR, CosineAnnealingWarmRestarts, Cosine
 import time
 import multiprocessing
 from model_new2 import get_model2
-
+def uncertainty_based_fusion(p1, p2):
+    """
+    基于预测不确定性的融合方法，用于两个预测的融合
+    
+    参数:
+    p1: 第一个预测，形状为 [batch_size, num_classes]
+    p2: 第二个预测，形状为 [batch_size, num_classes]
+    
+    返回:
+    fusion_p: 融合后的预测，形状为 [batch_size, num_classes]
+    """
+    # 计算两个预测的不确定性权重
+    uncertainty1 = 1.0 / ((1-p1)**2 + p1**2 + 1e-8)  # 避免除零
+    uncertainty2 = 1.0 / ((1-p2)**2 + p2**2 + 1e-8)
+    
+    # 堆叠权重
+    weights = torch.stack([uncertainty1, uncertainty2], dim=0)  # [2, batch_size, num_classes]
+    
+    # 归一化权重
+    weights_sum = torch.sum(weights, dim=0, keepdim=True)  # [1, batch_size, num_classes]
+    normalized_weights = weights / (weights_sum + 1e-8)  # [2, batch_size, num_classes]
+    
+    # 堆叠预测
+    preds = torch.stack([p1, p2], dim=0)  # [2, batch_size, num_classes]
+    
+    # 加权融合
+    fusion_p = torch.sum(preds * normalized_weights, dim=0)  # [batch_size, num_classes]
+    
+    return fusion_p
 
 def view_mixup(data_list,label,v_mask,l_mask):
     new_data = []
@@ -51,7 +79,7 @@ def train(loader, model, loss_model, opt, sche, epoch,dep_graph,last_preds,logge
         inc_V_ind = inc_V_ind.float().to('cuda:0')
         inc_L_ind = inc_L_ind.float().to('cuda:0')
         data_selected = [data[i] for i in selected_view]
-        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, pred, xr_p_list, cos_loss, mapped_loss, loss_manifold_p_avg , fusion_p, mapped_fea = model(data_selected,mode=1,mask=inc_V_ind )
+        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, pred, xr_p_list, cos_loss, mapped_loss, loss_manifold_p_avg , fusion_p, mapped_fea, loss_align = model(data_selected,mode=1,mask=inc_V_ind )
         All_preds = torch.cat([All_preds,pred],dim=0)
         if epoch<args.pre_epochs:
             loss_mse_viewspec = 0
@@ -72,7 +100,7 @@ def train(loader, model, loss_model, opt, sche, epoch,dep_graph,last_preds,logge
                 ## xr_list是每个重构的视图，这个损失是用来约束VAE的，使得潜在空间的特征能够很好的表征原数据
                 loss_mse_p += loss_model.weighted_wmse_loss(data_selected[v],xr_p_list[v],inc_V_ind[:,v],reduction='mean')
             assert torch.sum(torch.isnan(loss_mse)).item() == 0
-            loss = loss_CL + loss_mse *args.alpha + z_c_loss*args.beta + cohr_loss *args.sigma + mapped_loss*0.1 + loss_mse_p*0.1 + cos_loss*0.1 
+            loss = loss_CL + loss_mse *args.alpha + z_c_loss*args.beta + cohr_loss *args.sigma + mapped_loss*0.1 + loss_mse_p*0.1 + cos_loss*0.1 + loss_align*0.5
         # loss = loss_CL
         opt.zero_grad()
         loss.backward()
@@ -99,6 +127,7 @@ def train_step2(loader, model, model_last, loss_model, opt, sche, epoch,dep_grap
     losses = AverageMeter()
     mce= nn.MultiLabelSoftMarginLoss()
     model.train()
+    model_last.train()
     end = time.time()
     All_preds = torch.tensor([]).cuda()
     for i, (data, label, inc_V_ind, inc_L_ind) in enumerate(loader):
@@ -108,16 +137,16 @@ def train_step2(loader, model, model_last, loss_model, opt, sche, epoch,dep_grap
         inc_V_ind = inc_V_ind.float().to('cuda:0')
         inc_L_ind = inc_L_ind.float().to('cuda:0')
         data_selected = [data[i] for i in selected_view]
-        with torch.no_grad():
-            # 准备第一阶段模型的输入
-            data_view_1 = [data[i] for i in selected_view_last]  # 使用第一阶段的视图选择
-            # 使用第一阶段模型生成当前批次对应的输出
-            _, _, _, _, _, _, _, _, xr_p_list, _, mapped_loss, loss_manifold_p_avg , fusion_p, mapped_fea = model_last(data_view_1,mode=1, mask=inc_V_ind)
+
+        # 准备第一阶段模型的输入
+        data_view_1 = [data[i] for i in selected_view_last]  # 使用第一阶段的视图选择
+        # 使用第一阶段模型生成当前批次对应的输出
+        _, _, _, _, _, _, _, pred_last, xr_p_list, _, mapped_loss, loss_manifold_p_avg , fusion_p, mapped_fea,_ = model_last(data_view_1,mode=1, mask=inc_V_ind)
 
         z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, pred, xr_p_list, cos_loss, loss_manifold_p_avg = model(data_selected,mapped_fea,mask=inc_V_ind )
+        loss_align = torch.pow(pred_last - pred, 2).mean()
         All_preds = torch.cat([All_preds,pred],dim=0)
         if epoch<args.pre_epochs:
-            loss_mse_viewspec = 0
             loss_CL_views = 0
             loss_list=[]
             loss = loss_CL_views
@@ -135,7 +164,7 @@ def train_step2(loader, model, model_last, loss_model, opt, sche, epoch,dep_grap
                 ## xr_list是每个重构的视图，这个损失是用来约束VAE的，使得潜在空间的特征能够很好的表征原数据
                 loss_mse_p += loss_model.weighted_wmse_loss(data_selected[v],xr_p_list[v],inc_V_ind[:,v],reduction='mean')
             assert torch.sum(torch.isnan(loss_mse)).item() == 0
-            loss = loss_CL + loss_mse *args.alpha + z_c_loss*args.beta + cohr_loss *args.sigma + loss_mse_p*0.01 + cos_loss*0.01 
+            loss = loss_CL + loss_mse *args.alpha + z_c_loss*args.beta + cohr_loss *args.sigma + loss_mse_p*0.01 + cos_loss*0.01 + loss_align*0.1
         # loss = loss_CL
         opt.zero_grad()
         loss.backward()
@@ -168,7 +197,7 @@ def test1(loader, model, loss_model, epoch,logger,selected_view):
         data=[v_data.to('cuda:0') for v_data in data]
         data_selected = [data[i] for i in selected_view]
         # pred,_,_ = model(data,mask=torch.ones_like(inc_V_ind).to('cuda:0'))
-        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, qc_z, xr_p_list, cos_loss, _, _, fusion_p, mapped_fea = model(data_selected,mode=1,mask=inc_V_ind.to('cuda:0'))
+        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, qc_z, xr_p_list, cos_loss, _, _, fusion_p, mapped_fea,_ = model(data_selected,mode=1,mask=inc_V_ind.to('cuda:0'))
         # qc_x = vade_trick(fusion_z_mu, model.mix_prior, model.mix_mu, model.mix_sca)
         pred = qc_z
         pred = pred.cpu()
@@ -214,10 +243,11 @@ def test2(loader, model, model_last, loss_model, epoch,logger,selected_view, sel
             # 准备第一阶段模型的输入
             data_view_1 = [data[i] for i in selected_view_last]  # 使用第一阶段的视图选择
             # 使用第一阶段模型生成当前批次对应的输出
-            z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, pred, xr_p_list, cos_loss, mapped_loss, loss_manifold_p_avg , fusion_p, mapped_fea = model_last(data_view_1, mode=1,mask=inc_V_ind)
+            _,_,_,_,_,_,_, pred, xr_p_list, cos_loss, mapped_loss, loss_manifold_p_avg , fusion_p, mapped_fea, _ = model_last(data_view_1, mode=1,mask=inc_V_ind)
         z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, qc_z, xr_p_list, cos_loss, _ = model(data_selected,mapped_fea,mask=inc_V_ind.to('cuda:0'))
         # qc_x = vade_trick(fusion_z_mu, model.mix_prior, model.mix_mu, model.mix_sca)
         pred = qc_z
+        pred = uncertainty_based_fusion(pred, qc_z)
         pred = pred.cpu()
         total_labels = np.concatenate((total_labels,label.numpy()),axis=0) if len(total_labels)>0 else label.numpy()
         total_preds = np.concatenate((total_preds,pred.detach().numpy()),axis=0) if len(total_preds)>0 else pred.detach().numpy()
@@ -329,8 +359,8 @@ def main(args,file_path):
                     model_2 = None
                     model_1 = None
                     start = time.time()
-                    selected_view1 = [0,1]
-                    selected_view2 = [2,0]
+                    selected_view1 = [0,1,2,3,4,5]
+                    selected_view2 = [0,1,2,3,4]
                     d_list_selected1 = [train_dataset.d_list[i] for i in selected_view1]
                     d_list_selected2 = [train_dataset.d_list[i] for i in selected_view2]
                     model_1 = get_model(d_list_selected1, num_classes=classes_num, z_dim=args.z_dim, adj=dep_graph, rand_seed=0)
@@ -338,6 +368,7 @@ def main(args,file_path):
                     optimizer_1 = Adam(model_1.parameters(), lr=args.lr)
                     optimizer_2 = Adam([
                                     {'params': model_2.parameters(), 'lr': args.lr},
+                                    {'params': model_1.parameters(), 'lr': args.lr},
                                 ])
                     loss_model = Loss()
                     for epoch in range(args.epochs):
@@ -381,49 +412,9 @@ def main(args,file_path):
                                     best_epoch=epoch
                                 train_losses_last = train_losses
                                 total_losses.update(train_losses.sum)
-                    # 定义所有需要测试的视图组合
-                    # all_selected_views = [
-                    #     [0, 1, 2, 3, 4, 5],  # 所有视图
-                    # ]
-                    
                     
                     # 创建一个字典来存储所有视图组合的结果
                     all_views_results = {}
-                    
-                    # # 为每个视图组合进行训练和测试
-                    # for selected_view in all_selected_views:
-                    #     view_name = ','.join(map(str, selected_view))
-                    #     logger.info(f"Training with selected views: {view_name}")
-                        
-                    #     start = time.time()
-                    #     d_list_selected = [train_dataset.d_list[i] for i in selected_view]  
-                    #     model = get_model(d_list_selected, num_classes=classes_num, z_dim=args.z_dim, adj=dep_graph, rand_seed=0)
-                    #     loss_model = Loss()
-                    #     optimizer = Adam(model.parameters(), lr=args.lr)
-                    #     scheduler = None
-                        
-                    #     static_res = 0
-                    #     epoch_results = [AverageMeter() for i in range(9)]
-                    #     total_losses = AverageMeter()
-                    #     train_losses_last = AverageMeter()
-                    #     best_epoch = 0
-                    #     best_model_dict = {'model': model.state_dict(), 'epoch': 0}
-                        
-                    #     for epoch in range(args.epochs):
-                    #         if epoch == 0:
-                    #             All_preds = None
-                    #         train_losses, model, All_preds, label_emb_sample = train(train_dataloder, model, loss_model, optimizer, scheduler, epoch, dep_graph, All_preds, logger, selected_view)
-                    #         label_InP = label_emb_sample.mm(label_emb_sample.t())
-                            
-                    #         if epoch >= args.pre_epochs:
-                    #             val_results = test1(val_dataloder, model, loss_model, epoch, logger, selected_view)
-                    #             if val_results[0]*0.25+val_results[4]*0.25+val_results[5]*0.25 >= static_res:
-                    #                 static_res = val_results[0]*0.25+val_results[4]*0.25+val_results[5]*0.25
-                    #                 best_model_dict['model'] = copy.deepcopy(model.state_dict())
-                    #                 best_model_dict['epoch'] = epoch
-                    #                 best_epoch = epoch
-                    #             train_losses_last = train_losses
-                    #             total_losses.update(train_losses.sum)
                     model_1.load_state_dict(best_model_dict1['model'])
                     print("test results_1")
                     test_results_1 = test1(test_dataloder,model_1,loss_model,epoch,logger,selected_view1)  
@@ -431,8 +422,7 @@ def main(args,file_path):
                     end = time.time()
                     logger.info(f"Best epoch: {best_model_dict2['epoch']}")
                     test_results = test2(test_dataloder, model_2, model_1, loss_model, epoch, logger, selected_view2,selected_view1)
-                    for selected_view in selected_view2:
-                        view_name = ','.join(map(str, selected_view))
+                    view_name = ','.join(map(str, selected_view2))
                     # 存储当前视图组合的结果
                     all_views_results[view_name] = {
                         'accuracy': test_results[0],
@@ -447,7 +437,8 @@ def main(args,file_path):
                     }
                     
                     # 清理显存
-                    del model
+                    del model_1
+                    del model_2
                     torch.cuda.empty_cache()
                     
                     # 收集当前fold的结果，保存到对应的列表中

@@ -219,24 +219,33 @@ class VAE(nn.Module):
         uniview_sca_s_list = []
         fea_s_list = []
         fea_p_list = []
+        fea_origin_list = []
+        origin_mu_s_list = []
+        origin_sca_s_list = []
         for v in range(self.num_views):
             if torch.sum(torch.isnan(x_list[v])).item() > 0:
                 print("zzz:nan")
                 pass
             # 每一个view都通过qz_inference提取特征
             fea_s = self.qz_inference_s[v](x_list[v])
-            fea_p = self.qz_inference_p[v](x_list[v])   
+            fea_p = self.qz_inference_p[v](x_list[v])  
+            fea_origin_list.append(fea_s) 
             fea_s_list.append(fea_s)
             fea_p_list.append(fea_p)
         fea_concat = torch.cat(fea_s_list[:-1], dim=1)
         mapped_fea = self.mlp_2view(fea_concat)
         map_loss = F.mse_loss(mapped_fea, fea_s_list[-1])
+
         fea_s_list[-1] = mapped_fea
         for fea_s in (fea_s_list):
             z_mu_v_s, z_sca_v_s = self.qz_inference_header(fea_s)
             uniview_mu_s_list.append(z_mu_v_s)
             uniview_sca_s_list.append(z_sca_v_s)
-        return uniview_mu_s_list, uniview_sca_s_list, fea_p_list, mapped_fea, map_loss
+        for fea_origin in (fea_origin_list):
+            z_mu_v_s, z_sca_v_s = self.qz_inference_header(fea_origin)
+            origin_mu_s_list.append(z_mu_v_s)
+            origin_sca_s_list.append(z_sca_v_s)
+        return uniview_mu_s_list, uniview_sca_s_list, fea_p_list, mapped_fea, map_loss, origin_mu_s_list, origin_sca_s_list
     
     def inference_z_womap(self, x_list):
         uniview_mu_s_list = []
@@ -342,7 +351,7 @@ class VAE(nn.Module):
     def forward(self, x_list, mode,mask=None):
         # uniview_mu_list, uniview_sca_list = self.inference_z(x_list)
         if (mode == 1):
-            mu_s_list, sca_s_list, fea_p_list, mapped_fea, map_loss = self.inference_z1(x_list)
+            mu_s_list, sca_s_list, fea_p_list, mapped_fea, map_loss, origin_mu_s_list, origin_sca_s_list = self.inference_z1(x_list)
         else:
             mu_s_list, sca_s_list, fea_p_list = self.inference_z_womap(x_list)
             mapped_fea = None
@@ -356,6 +365,7 @@ class VAE(nn.Module):
         #     z_mu = fill_with_label(label_embedding_mu,label,z_mu,mask)
         #     z_sca = fill_with_label(label_embedding_var,label,z_sca,mask)
         fusion_mu, fusion_sca = self.poe_aggregate(z_mu, z_sca, mask)
+        fusion_origin_mu, fusion_origin_sca = self.poe_aggregate(torch.stack(origin_mu_s_list,dim=0), torch.stack(origin_sca_s_list,dim=0), mask)
         z_sample_list_s = []
         for i in range(len(sca_s_list)):
             z_sample_view_s = gaussian_reparameterization_var(mu_s_list[i], sca_s_list[i], times=5)
@@ -364,6 +374,7 @@ class VAE(nn.Module):
             pass
         assert torch.sum(fusion_sca<0).item() == 0
         z_sample = gaussian_reparameterization_var(fusion_mu, fusion_sca,times=10)
+        z_origin_sample = gaussian_reparameterization_var(fusion_origin_mu, fusion_origin_sca,times=10)
         if torch.sum(torch.isnan(z_sample)).item() > 0:
             print("z:nan")
             pass
@@ -379,4 +390,4 @@ class VAE(nn.Module):
             # z_sample_list.append((mu))
         # xr_list_views = self.generation_x_s1(z_sample_list)
         # c_z_sample = self.gaussian_rep_function(fusion_z_mu, fusion_z_sca)
-        return z_sample, mu_s_list, sca_s_list, fusion_mu, fusion_sca, xr_list, xr_p_list, cos_loss, mapped_fea, map_loss, fea_p_list
+        return z_sample, mu_s_list, sca_s_list, fusion_mu, fusion_sca, xr_list, xr_p_list, cos_loss, mapped_fea, map_loss, fea_p_list, z_origin_sample

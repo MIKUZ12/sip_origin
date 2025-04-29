@@ -197,9 +197,15 @@ class Net(nn.Module):
         assert torch.sum(torch.isinf(aggregate_var)).item()==0
         return aggregate_mu, aggregate_var
     def forward(self, x_list,mode,mask):
-        # Generating semantic label embeddings via label semantic encoding module
-        # label_embedding = self.GIN_encoder(self.label_embedding, self.label_adj)
-        # print(self.label_adj[:10,:10])
+        masked_x_list = []
+        dropout_rate = 0.2
+        for x in x_list:
+            # 生成与x相同形状的随机掩码
+            random_mask = torch.rand_like(x) > dropout_rate
+            # 应用掩码（相当于dropout）
+            masked_x = x * random_mask.float()
+            masked_x_list.append(masked_x)
+
         label_embedding  =  self.label_embedding_u
         # label_embedding = gaussian_reparameterization_std(self.label_embedding_u,self.label_embedding_std)
         # label_embedding = self.GAT_encoder(label_embedding, self.adj)
@@ -212,9 +218,9 @@ class Net(nn.Module):
         # label_embedding_sample = self.GAT_encoder(label_embedding_sample, self.adj)
         if torch.sum(torch.isnan(label_embedding)).item() > 0:
             assert torch.sum(torch.isnan(label_embedding)).item() == 0
-        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, xr_p_list, cos_loss, mapped_fea, mapped_loss,fea_p_list = self.VAE(x_list,mode,mask=None)  #Z[i]=[128, 260, 512] b c d_e
+        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, xr_p_list, cos_loss, mapped_fea, mapped_loss,fea_p_list, z_origin_sample = self.VAE(masked_x_list,mode,mask=None)  #Z[i]=[128, 260, 512] b c d_e
         if torch.sum(torch.isnan(z_sample)).item() > 0:
-            pass
+            pass 
         p_vae_p_list = []
         for v in range(len(fea_p_list)):
             qc_p_z = torch.cat((fea_p_list[v].unsqueeze(1).repeat(1,label_embedding_sample.shape[0],1),label_embedding_sample.unsqueeze(0).repeat(fea_p_list[v].shape[0],1,1)),dim=-1)
@@ -231,12 +237,20 @@ class Net(nn.Module):
         fusion_p = self.VAE.weighted_feature_aggregate(fea_p_list, weights_p)
         fusion_p_sigmoid = fusion_p.sigmoid()
         fusion_fea = z_sample * fusion_p_sigmoid
+
+        qc_origin_z = torch.cat((z_origin_sample.unsqueeze(1).repeat(1,label_embedding_sample.shape[0],1),label_embedding_sample.unsqueeze(0).repeat(z_origin_sample.shape[0],1,1)),dim=-1)
+        p_origin = self.cls_conv(qc_origin_z).squeeze(-1)
+        p_origin = torch.sigmoid(p_origin)
+
+
         fusion_fea = self.batchnorm(fusion_fea)
         qc_z = torch.cat((fusion_fea.unsqueeze(1).repeat(1,label_embedding_sample.shape[0],1),label_embedding_sample.unsqueeze(0).repeat(fusion_fea.shape[0],1,1)),dim=-1)
         p = self.cls_conv(qc_z).squeeze(-1)
         p = torch.sigmoid(p)
 
-        return z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_embedding_sample, p, xr_p_list, cos_loss, mapped_loss, loss_manifold_p_avg, fusion_p, mapped_fea
+        loss_align = torch.pow(p_origin - p, 2).mean()
+
+        return z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_embedding_sample, p, xr_p_list, cos_loss, mapped_loss, loss_manifold_p_avg, fusion_p, mapped_fea, loss_align
 
 def get_model(d_list,num_classes,z_dim,adj,rand_seed=0):
     model = Net(d_list,num_classes=num_classes,z_dim=z_dim,adj=adj,rand_seed=rand_seed)

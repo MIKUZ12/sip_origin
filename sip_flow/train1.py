@@ -49,7 +49,7 @@ def train(loader, model, loss_model, opt, sche, epoch,dep_graph,last_preds,logge
         inc_V_ind = inc_V_ind.float().to('cuda:0')
         inc_L_ind = inc_L_ind.float().to('cuda:0')
         data_selected = [data[i] for i in selected_view]
-        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, pred, xr_p_list, cos_loss, mapped_loss,loss_manifold_p_avg, fusion_p, mapped_fea = model(data_selected,mode=0,mask=inc_V_ind )
+        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, pred, xr_p_list, cos_loss, mapped_loss,loss_manifold_p_avg, fusion_p, mapped_fea,loss_align = model(data_selected,mode=0,mask=inc_V_ind )
         All_preds = torch.cat([All_preds,pred],dim=0)
         if epoch<args.pre_epochs:
             loss_mse_viewspec = 0
@@ -70,7 +70,7 @@ def train(loader, model, loss_model, opt, sche, epoch,dep_graph,last_preds,logge
                 ## xr_list是每个重构的视图，这个损失是用来约束VAE的，使得潜在空间的特征能够很好的表征原数据
                 loss_mse_p += loss_model.weighted_wmse_loss(data_selected[v],xr_p_list[v],inc_V_ind[:,v],reduction='mean')
             assert torch.sum(torch.isnan(loss_mse)).item() == 0
-            loss = loss_CL + loss_mse *args.alpha + z_c_loss*args.beta + cohr_loss *args.sigma
+            loss = loss_CL + loss_mse *args.alpha + z_c_loss*args.beta + cohr_loss *args.sigma + loss_mse_p*0.1 + 0.1*cos_loss + loss_align*0.1 + mapped_loss*0.1
         # loss = loss_CL
         opt.zero_grad()
         loss.backward()
@@ -103,7 +103,7 @@ def test(loader, model, loss_model, epoch,logger,selected_view):
         data=[v_data.to('cuda:0') for v_data in data]
         data_selected = [data[i] for i in selected_view]
         # pred,_,_ = model(data,mask=torch.ones_like(inc_V_ind).to('cuda:0'))
-        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, qc_z, xr_p_list, cos_loss, _ ,_,_,_ = model(data_selected,mode=0,mask=inc_V_ind.to('cuda:0'))
+        z_sample, uniview_mu_list, uniview_sca_list, fusion_z_mu, fusion_z_sca, xr_list, label_emb_sample, qc_z, xr_p_list, cos_loss, _ ,_,_,_,_ = model(data_selected,mode=0,mask=inc_V_ind.to('cuda:0'))
         # qc_x = vade_trick(fusion_z_mu, model.mix_prior, model.mix_mu, model.mix_sca)
         pred = qc_z
         pred = pred.cpu()
